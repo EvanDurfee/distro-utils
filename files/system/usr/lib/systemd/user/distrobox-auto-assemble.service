@@ -1,0 +1,10 @@
+[Unit]
+Description=Distrobox auto assemble
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/distrobox-auto assemble --notify
+
+[Install]
+WantedBy=default.target
