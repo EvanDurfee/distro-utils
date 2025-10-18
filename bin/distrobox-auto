@@ -3,7 +3,7 @@
 set -eo pipefail
 # set -u throws a fit about accessing empty arrays
 
-PROG="$(basename "$BASH_SOURCE") "
+PROG="$(basename "$BASH_SOURCE")"
 
 _exit () {
 	exit_code="${1:-99}"
@@ -29,7 +29,8 @@ containers. Intended for use with systemd units to automate updates.
 Automated pulls have a built-in grace period to avoid spamming the user
 with warnings for e.g. temporary network failures.
 
-Reads distrobox ini files from \$XDG_CONFIG_HOME/distrobox-auto/boxes.d/
+Reads distrobox ini files from \$XDG_CONFIG_HOME/distrobox.d/ and from
+\$XDG_CONFIG_HOME/distrobox/distrobox.ini.
 
 commands:
     list           list all configured boxes
@@ -47,8 +48,8 @@ EOF
 ARGS=$(getopt --name "$PROG" --long help,notify --options h -- "$@")
 eval set -- "$ARGS"
 
-name=""
-config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox-auto"
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox"
+ini_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox.d"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/distrobox-auto"
 notify=false
 # Notify user if --notify is set and the last successful pull happened more than 18 hours ago
@@ -88,7 +89,7 @@ locate_ini_files() {
 	fi
 	while IFS='' read -r f; do
 		ini_files+=("$f");
-	done < <(find "$config_dir"/boxes.d/ -type f,l -name "*.ini")
+	done < <(find "$ini_dir" -type f,l -name "*.ini")
 }
 
 # print sha256 sum of the input string
@@ -150,7 +151,7 @@ assemble() {
 	return $exit_code
 }
 
-list() {
+list_boxes() {
 	read_ini_files
 	for box in "${!box_names[@]}"; do
 		echo "$box:    ${box_names[$box]}"
@@ -210,20 +211,14 @@ pull() {
 	return $exit_code
 }
 
-while [ $# -gt 0 ]; do
-	case "$1" in
-		assemble)
-			assemble || exit $?
-			break
-			;;
-		pull)
-			pull || exit $?
-			break
-			;;
-		list)
-			list || exit $?
-			break
-			;;
-	esac
-	shift
-done
+case "$1" in
+	assemble)
+		assemble || exit $?
+		;;
+	pull)
+		pull || exit $?
+		;;
+	list)
+		list_boxes || exit $?
+		;;
+esac
