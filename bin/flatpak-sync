@@ -84,6 +84,7 @@ fi
 
 # Configure the repo and install flatpaks specified in a config file containing a single repo entry.
 apply_config() {
+	# Very janky yaml parsing - requires only receiving one list element and a reasonably well structured yaml
 	config_file="$1"
 	remote_name="$(grep -E '^ *name: +' "$config_file" | sed -E -e 's/^ *name: +//' -e 's/ *(#.*)?$//')"
 	remote_title="$(grep -E '^ *title: +' "$config_file" | sed -E -e 's/^ *title: +//' -e 's/ *(#.*)?$//')"
@@ -153,7 +154,7 @@ case "$1" in
 		cmd_install "${config_files[@]}" || exit $?
 		;;
 	init)
-		cmd_init "$config_files" || exit $?
+		cmd_init "${config_files[@]}" || exit $?
 		;;
 	*)
 		echo "Unrecognized command \"$1\"" >&2
