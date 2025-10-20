@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+# set -u throws a fit about accessing empty arrays
+
+PROG="$(basename "$BASH_SOURCE")"
+
+cfg_tmp_dir="$(mktemp -d)"
+
+_exit () {
+	exit_code="${1:-99}"
+	# Untrap exit signal to avoid looping
+	trap - EXIT
+	# Kill any direct descendents before exiting
+	pkill -P $$ || :
+	if [ -e "$cfg_tmp_dir" ]; then
+		rm -r "$cfg_tmp_dir"
+	fi
+	exit "$exit_code"
+}
+
+trap '_exit 7' SIGINT SIGTERM SIGHUP
+trap '_exit $?' EXIT
+
+print_help () {
+	cat <<EOF
+Usage: $PROG [--file=CONFIG] COMMAND [OPTION...]
+
+Automate flatpak installation.
+
+Add flatpak repos and install a declarative list of flatpaks.
+Uses the same format as bluebuild's default_flatpak module v2.
+
+commands:
+  init            initialize a config file
+  install         install configured flatpaks
+
+options:
+  -f, --file CONFIG  config file to use (default: /usr/share/flatpak-sync/config.yaml)
+  -h, --help       print usage information and exit
+      --system     install system-wide flatpaks (requires elevated privileges)
+      --user       install user flatpaks
+EOF
+}
+
+# Requires gnu enhanced getopt
+ARGS=$(getopt --name "$PROG" --long 'help,system,user,file:' --options 'hf:' -- "$@")
+eval set -- "$ARGS"
+
+#config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox"
+#ini_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox.d"
+#cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/distrobox-auto"
+system=true
+DEFAULT_CONFIG_FILE="/usr/share/flatpak-sync/config.yaml"
+config_files=()
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h | --help)
+			print_help
+			exit 0
+			;;
+		--system)
+			system=true
+			;;
+		--user)
+			system=false
+			;;
+		-f | --file)
+			shift
+			config_files+=("$1")
+			;;
+		--)
+			shift
+			break
+			;;
+	esac
+	shift
+done
+
+if [ "${#config_files[@]}" -eq 0 ]; then
+	config_files+=("$DEFAULT_CONFIG_FILE")
+fi
+
+# Configure the repo and install flatpaks specified in a config file containing a single repo entry.
+apply_config() {
+	config_file="$1"
+	remote_name="$(grep -E '^ *name: +' "$config_file" | sed -E -e 's/^ *name: +//' -e 's/ *(#.*)?$//')"
+	remote_title="$(grep -E '^ *title: +' "$config_file" | sed -E -e 's/^ *title: +//' -e 's/ *(#.*)?$//')"
+	remote_url="$(grep -E '^ *url: +' "$config_file" | sed -E -e 's/^ *url: +//' -e 's/ *(#.*)?$//')"
+	flatpaks=()
+	do_match=false
+	match_min_indent=''
+	while IFS='' read -r line; do
+		if echo "$line" | grep -E --quiet "^ *-? *install:"; then
+			do_match=true
+			match_min_indent="$(echo "$line" | sed -E -e 's/install:.*//' -e 's/-/ /')"
+		elif "$do_match"; then
+			if echo "$line" | grep -E --quiet "^ *(#.*)?$"; then
+				:  # empty line or comment
+			elif echo "$line" | grep -E --quiet "^$match_min_indent *-"; then
+				flatpak="$(echo "$line" | sed -E -e "s/^$match_min_indent *- *//" -e 's/ *(#.*)?$//')"
+				flatpaks+=("$flatpak")
+			else
+				do_match=false
+				break
+			fi
+		fi
+	done < "$config_file"
+	# End parsing
+
+	remote_type="system"
+	if ! $system; then
+		remote_type="user"
+	fi
+	echo "Adding $remote_type remote $remote_name ($remote_title) at $remote_url"
+	flatpak remote-add "--$remote_type" --if-not-exists "$remote_name" --title="$remote_title" https://dl.flathub.org/repo/flathub.flatpakrepo
+	flatpak install "--$remote_type" --noninteractive "$remote_name" "${flatpaks[@]}"
+}
+
+# concat config files together, then split per repo based on the expected yaml format
+cmd_install() {
+	config_files=("$@")
+	repo_configs=()
+	cat "${config_files[@]}" | csplit --digits=2 --quiet --prefix="$cfg_tmp_dir/repo" - "/^- /" "{*}" --elide-empty-files
+	while IFS='' read -r f; do
+		repo_configs+=("$f");
+	done < <(find "$cfg_tmp_dir" -type f -name "repo*")
+	for repo_config in "${repo_configs[@]}"; do
+		apply_config "$repo_config"
+	done
+	return 0
+}
+
+cmd_init() {
+	template_file="$1"
+	if [ -s "$template_file" ]; then
+		echo "$template_file already exists and is not empty!" >&2
+		return 1
+	fi
+	cat <<'EOF' > "$template_file"
+- repo:
+    name: flathub
+    title: Flathub
+    url: https://dl.flathub.org/repo/flathub.flatpakrepo
+  install:
+  - com.github.tchx84.Flatseal
+EOF
+}
+
+case "$1" in
+	install)
+		cmd_install "${config_files[@]}" || exit $?
+		;;
+	init)
+		cmd_init "$config_files" || exit $?
+		;;
+	*)
+		echo "Unrecognized command \"$1\"" >&2
+		exit 1
+		;;
+esac
