@@ -63,7 +63,6 @@ while [ $# -gt 0 ]; do
 			;;
 		--notify)
 			notify=true
-			break
 			;;
 		--)
 			shift
@@ -220,5 +219,9 @@ case "$1" in
 		;;
 	list)
 		list_boxes || exit $?
+		;;
+	*)
+		echo "Unrecognized command \"$1\"" >&2
+		exit 1
 		;;
 esac

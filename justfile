@@ -2,7 +2,7 @@
 
 install:
     sudo cp ./bin/distrobox-auto /usr/libexec/distrobox-auto
-    sudo cp ./units/distrobox-auto-{pull.service,pull.timer,assemble.service} /usr/lib/systemd/user/
+    sudo cp ./units/user/distrobox-auto-{pull.service,pull.timer,assemble.service} /usr/lib/systemd/user/
 
 uninstall:
     sudo rm -f /usr/libexec/distrobox-auto
