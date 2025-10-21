@@ -167,8 +167,18 @@ apply_config() {
 		if ! $remote_exists; then
 			return 0
 		fi
+		echo "Preparing to delete remote $remote_name"
+
+		mapfile -t apps_to_uninstall < <(flatpak list --"$remote_type"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		echo "Uninstalling apps ${apps_to_uninstall[*]} from remote $remote_name"
+		flatpak uninstall "--$remote_type" --noninteractive "${apps_to_uninstall[@]}"
+
+		mapfile -t runtimes_to_uninstall < <(flatpak list --"$remote_type" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		echo "Uninstalling runtimes ${runtimes_to_uninstall[*]} from remote $remote_name"
+		flatpak uninstall "--$remote_type" --noninteractive "${runtimes_to_uninstall[@]}"
+
 		echo "Removing remote $remote_name"
-		flatpak remote-delete "--$remote_type" --force "$remote_name"
+		flatpak remote-delete "--$remote_type" "$remote_name"
 		return 0
 	fi
 
@@ -197,6 +207,7 @@ apply_config() {
 			flatpak uninstall "--$remote_type" --noninteractive "$remote_name" "${to_uninstall[@]}"
 		fi
 	fi
+	return 0
 }
 
 # concat config files together, then split per repo based on the expected yaml format
