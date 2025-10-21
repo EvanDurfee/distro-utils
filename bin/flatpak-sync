@@ -170,12 +170,16 @@ apply_config() {
 		echo "Preparing to delete remote $remote_name"
 
 		mapfile -t apps_to_uninstall < <(flatpak list --"$remote_type"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
-		echo "Uninstalling apps ${apps_to_uninstall[*]} from remote $remote_name"
-		flatpak uninstall "--$remote_type" --noninteractive "${apps_to_uninstall[@]}"
+		if [ "${#apps_to_uninstall[@]}" -gt 0 ]; then
+			echo "Uninstalling apps ${apps_to_uninstall[*]} from remote $remote_name"
+			flatpak uninstall "--$remote_type" --noninteractive "${apps_to_uninstall[@]}"
+		fi
 
 		mapfile -t runtimes_to_uninstall < <(flatpak list --"$remote_type" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
-		echo "Uninstalling runtimes ${runtimes_to_uninstall[*]} from remote $remote_name"
-		flatpak uninstall "--$remote_type" --noninteractive "${runtimes_to_uninstall[@]}"
+		if [ "${#runtimes_to_uninstall[@]}" -gt 0 ]; then
+			echo "Uninstalling runtimes ${runtimes_to_uninstall[*]} from remote $remote_name"
+			flatpak uninstall "--$remote_type" --noninteractive "${runtimes_to_uninstall[@]}"
+		fi
 
 		echo "Removing remote $remote_name"
 		flatpak remote-delete "--$remote_type" "$remote_name"
