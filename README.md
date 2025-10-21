@@ -10,7 +10,8 @@ By default, the config is read from `/usr/lib/flatpak-sync/config.yaml`, but
 different configs can be specified via the `-f`/`--file` flags.
 
 Intended for use in custom fedora atomic distros, but can be used elsewhere.
-It uses a subset of the format used by bluebuild's `default-flatpak v2` module.
+It uses a format based on bluebuild's `default-flatpak v2` module, but not
+identical.
 
 ## Usage
 

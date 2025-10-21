@@ -86,10 +86,30 @@ fi
 apply_config() {
 	# Very janky yaml parsing - requires only receiving one list element and a reasonably well structured yaml
 	config_file="$1"
+
+	# Return early if there are no non-empty, non-comment lines
+	if ! grep --quiet --invert-match -E '^[ '$'\t'']*(#.*)?$' "$config_file"; then
+		return 0
+	fi
+
+	# "parse" the repo block
 	remote_name="$(grep -E '^ *name: +' "$config_file" | sed -E -e 's/^ *name: +//' -e 's/ *(#.*)?$//')"
 	remote_title="$(grep -E '^ *title: +' "$config_file" | sed -E -e 's/^ *title: +//' -e 's/ *(#.*)?$//')"
 	remote_url="$(grep -E '^ *url: +' "$config_file" | sed -E -e 's/^ *url: +//' -e 's/ *(#.*)?$//')"
-	flatpaks=()
+	remote_removed="$(grep -E '^ *remove: +' "$config_file" | sed -E -e 's/^ *remove: +//' -e 's/ *(#.*)?$//')"
+	# TODO: remote_type specified via the cli; should it be in the config instead?
+	remote_type="system"
+	if ! $system; then
+		remote_type="user"
+	fi
+	if [ "${remote_removed,,}" = "true" ] || [ "${remote_removed,,}" = "yes" ]; then
+		remote_removed=true
+	else
+		remote_removed=false
+	fi
+
+	# Begin install parsing
+	install=()
 	do_match=false
 	match_min_indent=''
 	while IFS='' read -r line; do
@@ -101,22 +121,82 @@ apply_config() {
 				:  # empty line or comment
 			elif echo "$line" | grep -E --quiet "^$match_min_indent *-"; then
 				flatpak="$(echo "$line" | sed -E -e "s/^$match_min_indent *- *//" -e 's/ *(#.*)?$//')"
-				flatpaks+=("$flatpak")
+				install+=("$flatpak")
 			else
 				do_match=false
 				break
 			fi
 		fi
 	done < "$config_file"
-	# End parsing
+	# End install parsing
 
-	remote_type="system"
-	if ! $system; then
-		remote_type="user"
+	# Begin uninstall parsing
+	uninstall=()
+	do_match=false
+	match_min_indent=''
+	while IFS='' read -r line; do
+		if echo "$line" | grep -E --quiet "^ *-? *uninstall:"; then
+			do_match=true
+			match_min_indent="$(echo "$line" | sed -E -e 's/uninstall:.*//' -e 's/-/ /')"
+		elif "$do_match"; then
+			if echo "$line" | grep -E --quiet "^ *(#.*)?$"; then
+				:  # empty line or comment
+			elif echo "$line" | grep -E --quiet "^$match_min_indent *-"; then
+				flatpak="$(echo "$line" | sed -E -e "s/^$match_min_indent *- *//" -e 's/ *(#.*)?$//')"
+				uninstall+=("$flatpak")
+			else
+				do_match=false
+				break
+			fi
+		fi
+	done < "$config_file"
+	# End uninstall parsing
+
+	if [ -z "$remote_name" ]; then
+		echo "Remote name not specified; please set remote.name for each flatpak remote" >&2
+		return 1
 	fi
-	echo "Adding $remote_type remote $remote_name ($remote_title) at $remote_url"
-	flatpak remote-add "--$remote_type" --if-not-exists "$remote_name" --title="$remote_title" https://dl.flathub.org/repo/flathub.flatpakrepo
-	flatpak install "--$remote_type" --noninteractive "$remote_name" "${flatpaks[@]}"
+
+	remote_exists=false
+	if flatpak remotes --show-disabled "--$remote_type" --columns=name | tail -n +1 | grep --quiet --line-regexp --fixed-strings "$remote_name"; then
+		remote_exists=true
+	fi
+
+	# Delete the remote and any sourced flatpaks if present
+	if "$remote_removed"; then
+		if ! $remote_exists; then
+			return 0
+		fi
+		echo "Removing remote $remote_name"
+		flatpak remote-delete "--$remote_type" --force "$remote_name"
+		return 0
+	fi
+
+	# Add the remote if not present
+	if ! "$remote_exists"; then
+		if [ -z "$remote_name" ] || [ -z "$remote_title" ] || [ -z "$remote_url" ]; then
+			echo "Remote info incomplete; name=$remote_name, title=$remote_title, url=$remote_url" >&2
+			return 1
+		fi
+		echo "Adding $remote_type remote $remote_name ($remote_title) at $remote_url"
+		flatpak remote-add "--$remote_type" --if-not-exists "$remote_name" --title="$remote_title" "$remote_url"
+	fi
+
+	# Enable the remote
+	flatpak remote-modify "--$remote_type" --enable "$remote_name"
+
+	# Install any desired flatpaks
+	if [ "${#install[@]}" -gt 0 ]; then
+		flatpak install "--$remote_type" --noninteractive "$remote_name" "${install[@]}"
+	fi
+
+	# Uninstall any flatpaks that are already installed from the given remote
+	if [ "${#uninstall[@]}" -gt 0 ]; then
+		mapfile -t to_uninstall < <(sort <(flatpak list --columns=origin,application | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2 | sort --unique) <(for flatpak in "${uninstall[@]}"; do echo "$flatpak"; done) | uniq -d)
+		if [ "${#to_uninstall[@]}" -gt 0 ]; then
+			flatpak uninstall "--$remote_type" --noninteractive "$remote_name" "${to_uninstall[@]}"
+		fi
+	fi
 }
 
 # concat config files together, then split per repo based on the expected yaml format
@@ -126,7 +206,7 @@ cmd_install() {
 	cat "${config_files[@]}" | csplit --digits=2 --quiet --prefix="$cfg_tmp_dir/repo" - "/^- /" "{*}" --elide-empty-files
 	while IFS='' read -r f; do
 		repo_configs+=("$f");
-	done < <(find "$cfg_tmp_dir" -type f -name "repo*")
+	done < <(find "$cfg_tmp_dir" -type f -name "repo*" | sort)
 	for repo_config in "${repo_configs[@]}"; do
 		apply_config "$repo_config"
 	done
@@ -144,8 +224,11 @@ cmd_init() {
     name: flathub
     title: Flathub
     url: https://dl.flathub.org/repo/flathub.flatpakrepo
+#    remove: false  # defaults to false; set to remove the remote and all flatpaks installed from the remote
   install:
-  - com.github.tchx84.Flatseal
+  - org.gnome.Paper
+  uninstall:
+  - org.gnome.Evince
 EOF
 }
 
