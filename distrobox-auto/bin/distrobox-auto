@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+# set -u throws a fit about accessing empty arrays
+
+PROG="$(basename "$BASH_SOURCE")"
+
+_exit () {
+	exit_code="${1:-99}"
+	# Untrap exit signal to avoid looping
+	trap - EXIT
+	# Kill any direct descendents before exiting
+	pkill -P $$ || :
+	exit "$exit_code"
+}
+
+trap '_exit 7' SIGINT SIGTERM SIGHUP
+trap '_exit $?' EXIT
+
+print_help () {
+	cat <<EOF
+Usage: $PROG COMMAND [OPTION]
+
+Update and assemble distrobox containers.
+
+Uses distrobox assemble and podman pull to update and rebuild distrobox
+containers. Intended for use with systemd units to automate updates.
+
+Automated pulls have a built-in grace period to avoid spamming the user
+with warnings for e.g. temporary network failures.
+
+Reads distrobox ini files from \$XDG_CONFIG_HOME/distrobox.d/ and from
+\$XDG_CONFIG_HOME/distrobox/distrobox.ini.
+
+commands:
+    list           list all configured boxes
+    pull           pull all configured images
+    assemble       (re)assemble all configured boxes
+
+options:
+  -h, --help       print usage information and exit
+      --notify     send user notifications about failures
+
+EOF
+}
+
+# Requires gnu enhanced getopt
+ARGS=$(getopt --name "$PROG" --long help,notify --options h -- "$@")
+eval set -- "$ARGS"
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox"
+ini_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox.d"
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/distrobox-auto"
+notify=false
+# Notify user if --notify is set and the last successful pull happened more than 18 hours ago
+pull_failure_grace_period="$((60 * 60 * 18))"
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h | --help)
+			print_help
+			exit 0
+			;;
+		--notify)
+			notify=true
+			;;
+		--)
+			shift
+			break
+			;;
+	esac
+	shift
+done
+
+ini_files=()
+# Map of distrobox names to the file defining them
+typeset -gA box_names
+# Set of image tags used in boxes
+typeset -gA images
+
+# Find all the distrobox.ini files defining what to create
+locate_ini_files() {
+	if [ "${#ini_files[@]}" -ne 0 ]; then
+		return 0;  # only load once
+	fi
+	if [ -e "$config_dir"/distrobox.ini ]; then
+		ini_files+=("$config_dir"/distrobox.ini)
+	fi
+	while IFS='' read -r f; do
+		ini_files+=("$f");
+	done < <(find "$ini_dir" -type f,l -name "*.ini")
+}
+
+# print sha256 sum of the input string
+sha256_string() {
+	# sha-3 would be faster, but coreutils only added `cksum -a sha3 -l 256` in september 2025
+	echo -n "$1" | sha256sum  | cut -d ' ' -f 1
+}
+
+# Very simplistic parsing to grab any box names and images
+read_ini_files() {
+	if [ "${#box_names[@]}" -gt 0 ] || [ "${#images[@]}" -gt 0 ]; then
+		return 0  # only load once
+	fi
+	locate_ini_files
+	for f in "${ini_files[@]}"; do
+		while IFS= read -r name; do
+			box_names["$name"]="$f"
+			# Search for [box_name]..., stripping everything but the contents of the brackets
+		done < <(grep -E '^\[.+\]' "$f" | sed -E -e 's/\[//' -e 's/\].*//')
+		while IFS= read -r image; do
+			images["$image"]="$f"
+			# Search for image=..., stripping tailing whitespace and inline comments
+		done < <(grep -E '^image=' "$f" | sed -E -e 's/^image=//' -e 's/[ '$'\t'']+(#.*)?$//')
+	done
+}
+
+# Recreate all configured boxes
+assemble() {
+	read_ini_files
+	typeset -A procs
+	for box in "${!box_names[@]}"; do
+		ini_file="${box_names[$box]}"
+		{
+			# stdout from parallel assembles screws up the terminal, just write to the void
+			distrobox assemble create --replace --file "$ini_file" --name "$box" >/dev/null 2>&1
+		} &
+		procs["$box"]="$!"
+	done
+
+	exit_code=0
+	failed_boxes=()
+	for box in "${!procs[@]}"; do
+		if ! wait "${procs[$box]}"; then
+			exit_code=1
+			failed_boxes+=("$box")
+			echo "Assemble failed for $box from ${box_names[$box]}" >&2
+		fi
+	done
+	if $notify && [ ${#failed_boxes[@]} -gt 0 ]; then
+		msg="Assemble failed for \"${failed_boxes[0]}\""
+		if [ ${#failed_boxes[@]} -gt 1 ]; then
+			msg+=" and $((${#failed_boxes[@]} - 1)) more distroboxes"
+		fi
+		notify-send \
+			--app-name="distrobox-auto" \
+			"Assemble Failed" \
+			"$(echo -e "$msg")"
+	fi
+	return $exit_code
+}
+
+list_boxes() {
+	read_ini_files
+	for box in "${!box_names[@]}"; do
+		echo "$box:    ${box_names[$box]}"
+	done
+	return 0
+}
+
+# Update the last updated timestamp for image $1
+update_last_pull() {
+	test -n "$1" || return 1
+	touch "$cache_dir"/latest-pull/"$(sha256_string "$1")"
+}
+
+# Check if the last successful pull is too old for image $1
+last_pull_expired() {
+	test -n "$1" || return 1
+	image_name_hash="$(sha256_string "$1")"
+	if ! [ -f "$cache_dir"/latest-pull/"$image_name_hash" ] \
+		|| [ $(( $(date +%s) - $(date -r "$cache_dir"/latest-pull/"$image_name_hash" +%s) )) -gt "$pull_failure_grace_period" ]; then
+			return 0
+	fi
+	return 1
+}
+
+pull() {
+	read_ini_files
+	typeset -A procs
+	mkdir -p "$cache_dir"/latest-pull
+	for image in "${!images[@]}"; do
+		# Should this support docker?
+		{
+			podman image pull --quiet "$image" && update_last_pull "$image"
+		} &
+		procs["$image"]="$!"
+	done
+
+	exit_code=0
+	failed_pulls=()
+	for image in "${!procs[@]}"; do
+		if ! wait "${procs[$image]}"; then
+			exit_code=1
+			failed_pulls+=("$image")
+			echo "Failed to pull image $image" >&2
+		fi
+	done
+
+	if $notify; then for image in "${failed_pulls[@]}"; do
+		if last_pull_expired "$image"; then
+			notify-send \
+				--app-name="distrobox-auto" \
+				--expire-time=300000 \
+				"Pull failed" \
+				"Image pull failed for $image"
+		fi
+	done; fi
+
+	return $exit_code
+}
+
+case "$1" in
+	assemble)
+		assemble || exit $?
+		;;
+	pull)
+		pull || exit $?
+		;;
+	list)
+		list_boxes || exit $?
+		;;
+	*)
+		echo "Unrecognized command \"$1\"" >&2
+		exit 1
+		;;
+esac
