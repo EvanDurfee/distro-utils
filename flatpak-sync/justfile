@@ -1,9 +1,11 @@
 # https://just.systems
 
 install:
-    sudo cp ./bin/flatpak-sync /usr/libexec/flatpak-sync
-    sudo cp ./units/system/flatpak-sync-install.service /usr/lib/systemd/system/flatpak-sync-install.service
+    sudo cp ./bin/flatpak-installation-sync /usr/bin/flatpak-installation-sync
+    sudo cp ./units/system/flatpak-installation-sync.service /usr/lib/systemd/system/flatpak-installation-sync.service
+    sudo cp ./units/user/flatpak-installation-sync.service /usr/lib/systemd/user/flatpak-installation-sync.service
 
 uninstall:
-    sudo rm -f /usr/libexec/flatpak-sync
-    sudo rm -f /usr/lib/systemd/system/flatpak-sync-install.service
+    sudo rm -f /usr/bin/flatpak-installation-sync
+    sudo rm -f /usr/lib/systemd/system/flatpak-installation-sync.service
+    sudo rm -f /usr/lib/systemd/user/flatpak-installation-sync.service

@@ -22,3 +22,11 @@ remotes and install the flatpaks specified in the config(s). Multiple configs
 can be specified by passing `-f`/`--file` multiple times.
 
 The systemd unit can be enabled with `systemctl enable flatpak-sync-install.service`
+
+## Caveats
+
+To keep dependencies to a minimum, this script uses only bash and gnu version of
+utils like sed and grep. The yaml parser is not at all robust, and should be
+treated gently. Json-style objects and lists are not supported. Anything after a
+"#" is treated as a comment and ignored, without regards for quoting.
+Indentation is used for list parsing but not strictly observed.

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-set -eo pipefail
-# set -u throws a fit about accessing empty arrays
+set -euo pipefail
 
 PROG="$(basename "$BASH_SOURCE")"
 
@@ -38,49 +37,82 @@ commands:
 options:
   -f, --file CONFIG  config file to use (default: /usr/share/flatpak-sync/config.yaml)
   -h, --help       print usage information and exit
-      --system     install system-wide flatpaks (requires elevated privileges)
-      --user       install user flatpaks
 EOF
 }
 
-# Requires gnu enhanced getopt
-ARGS=$(getopt --name "$PROG" --long 'help,system,user,file:' --options 'hf:' -- "$@")
-eval set -- "$ARGS"
 
-#config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox"
-#ini_dir="${XDG_CONFIG_HOME:-$HOME/.config}/distrobox.d"
-#cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/distrobox-auto"
-system=true
-DEFAULT_CONFIG_FILE="/usr/share/flatpak-sync/config.yaml"
-config_files=()
+main() {
+	# Requires gnu enhanced getopt
+	ARGS=$(getopt --name "$PROG" --long 'help,file:' --options 'hf:' -- "$@")
+	eval set -- "$ARGS"
 
-while [ $# -gt 0 ]; do
+	config_files=()
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-h | --help)
+				print_help
+				exit 0
+				;;
+			-f | --file)
+				shift
+				config_files+=("$1")
+				;;
+			--)
+				shift
+				break
+				;;
+		esac
+		shift
+	done
+
+	# Locate the user or system config to use
+	if [ "${#config_files[@]}" -eq 0 ]; then
+		default_config="$(determine_default_config)" || exit $?
+		config_files+=("$default_config")
+	fi
+
 	case "$1" in
-		-h | --help)
-			print_help
-			exit 0
+		install)
+			cmd_install "${config_files[@]}" || exit $?
 			;;
-		--system)
-			system=true
+		init)
+			cmd_init "${config_files[@]}" || exit $?
 			;;
-		--user)
-			system=false
-			;;
-		-f | --file)
-			shift
-			config_files+=("$1")
-			;;
-		--)
-			shift
-			break
+		*)
+			echo "Unrecognized command \"$1\"" >&2
+			exit 1
 			;;
 	esac
-	shift
-done
 
-if [ "${#config_files[@]}" -eq 0 ]; then
-	config_files+=("$DEFAULT_CONFIG_FILE")
-fi
+}
+
+determine_default_config() {
+	default_config="${XDG_CONFIG_HOME:-"$HOME"/.config}"/flatpak-sync/config.yaml
+	if ! [ -e "$default_config" ]; then
+		default_config="${XDG_CONFIG_HOME:-"$HOME"/.config}"/flatpak-sync/config.yml
+	fi
+	if ! [ -e "$default_config" ]; then
+		default_config="${XDG_CONFIG_HOME:-"$HOME"/.config}"/flatpak-sync.yaml
+	fi
+	if ! [ -e "$default_config" ]; then
+		default_config="${XDG_CONFIG_HOME:-"$HOME"/.config}"/flatpak-sync.yml
+	fi
+	if ! [ -e "$default_config" ]; then
+		default_config=/etc/flatpak-sync/config.yaml
+	fi
+	if ! [ -e "$default_config" ]; then
+		default_config=/usr/share/flatpak-sync/config.yaml
+	fi
+	if ! [ -e "$default_config" ]; then
+		echo "No config file found, please specify" >&2
+		return 5
+	fi
+	echo -n "$default_config"
+}
+
+# Ideally, we'd parse all of the configs, assemble a list of removals and adds, then apply that in one go
+# That would be a lot easier in a real programming language, though
 
 # Configure the repo and install flatpaks specified in a config file containing a single repo entry.
 apply_config() {
@@ -97,10 +129,12 @@ apply_config() {
 	remote_title="$(grep -E '^ *title: +' "$config_file" | sed -E -e 's/^ *title: +//' -e 's/ *(#.*)?$//')"
 	remote_url="$(grep -E '^ *url: +' "$config_file" | sed -E -e 's/^ *url: +//' -e 's/ *(#.*)?$//')"
 	remote_removed="$(grep -E '^ *remove: +' "$config_file" | sed -E -e 's/^ *remove: +//' -e 's/ *(#.*)?$//')"
-	# TODO: remote_type specified via the cli; should it be in the config instead?
-	remote_type="system"
-	if ! $system; then
-		remote_type="user"
+	remote_scope="$(grep -E '^ *scope: +' "$config_file" | sed -E -e 's/^ *scope: +//' -e 's/ *(#.*)?$//')"
+
+	if [ "${remote_removed,,}" = "user" ]; then
+		remote_scope="user"
+	else
+		remote_scope="system"
 	fi
 	if [ "${remote_removed,,}" = "true" ] || [ "${remote_removed,,}" = "yes" ]; then
 		remote_removed=true
@@ -158,7 +192,7 @@ apply_config() {
 	fi
 
 	remote_exists=false
-	if flatpak remotes --show-disabled "--$remote_type" --columns=name | tail -n +1 | grep --quiet --line-regexp --fixed-strings "$remote_name"; then
+	if flatpak remotes --show-disabled "--$remote_scope" --columns=name | tail -n +1 | grep --quiet --line-regexp --fixed-strings "$remote_name"; then
 		remote_exists=true
 	fi
 
@@ -169,20 +203,20 @@ apply_config() {
 		fi
 		echo "Preparing to delete remote $remote_name"
 
-		mapfile -t apps_to_uninstall < <(flatpak list --"$remote_type"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		mapfile -t apps_to_uninstall < <(flatpak list --"$remote_scope"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
 		if [ "${#apps_to_uninstall[@]}" -gt 0 ]; then
 			echo "Uninstalling apps ${apps_to_uninstall[*]} from remote $remote_name"
-			flatpak uninstall "--$remote_type" --noninteractive "${apps_to_uninstall[@]}"
+			flatpak uninstall "--$remote_scope" --noninteractive "${apps_to_uninstall[@]}"
 		fi
 
-		mapfile -t runtimes_to_uninstall < <(flatpak list --"$remote_type" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		mapfile -t runtimes_to_uninstall < <(flatpak list --"$remote_scope" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
 		if [ "${#runtimes_to_uninstall[@]}" -gt 0 ]; then
 			echo "Uninstalling runtimes ${runtimes_to_uninstall[*]} from remote $remote_name"
-			flatpak uninstall "--$remote_type" --noninteractive "${runtimes_to_uninstall[@]}"
+			flatpak uninstall "--$remote_scope" --noninteractive "${runtimes_to_uninstall[@]}"
 		fi
 
 		echo "Removing remote $remote_name"
-		flatpak remote-delete "--$remote_type" "$remote_name"
+		flatpak remote-delete "--$remote_scope" "$remote_name"
 		return 0
 	fi
 
@@ -192,23 +226,23 @@ apply_config() {
 			echo "Remote info incomplete; name=$remote_name, title=$remote_title, url=$remote_url" >&2
 			return 1
 		fi
-		echo "Adding $remote_type remote $remote_name ($remote_title) at $remote_url"
-		flatpak remote-add "--$remote_type" --if-not-exists "$remote_name" --title="$remote_title" "$remote_url"
+		echo "Adding $remote_scope remote $remote_name ($remote_title) at $remote_url"
+		flatpak remote-add "--$remote_scope" --if-not-exists "$remote_name" --title="$remote_title" "$remote_url"
 	fi
 
 	# Enable the remote
-	flatpak remote-modify "--$remote_type" --enable "$remote_name"
+	flatpak remote-modify "--$remote_scope" --enable "$remote_name"
 
 	# Install any desired flatpaks
 	if [ "${#install[@]}" -gt 0 ]; then
-		flatpak install "--$remote_type" --noninteractive "$remote_name" "${install[@]}"
+		flatpak install "--$remote_scope" --noninteractive "$remote_name" "${install[@]}"
 	fi
 
 	# Uninstall any flatpaks that are already installed from the given remote
 	if [ "${#uninstall[@]}" -gt 0 ]; then
 		mapfile -t to_uninstall < <(sort <(flatpak list --columns=origin,application | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2 | sort --unique) <(for flatpak in "${uninstall[@]}"; do echo "$flatpak"; done) | uniq -d)
 		if [ "${#to_uninstall[@]}" -gt 0 ]; then
-			flatpak uninstall "--$remote_type" --noninteractive "$remote_name" "${to_uninstall[@]}"
+			flatpak uninstall "--$remote_scope" --noninteractive "$remote_name" "${to_uninstall[@]}"
 		fi
 	fi
 	return 0
@@ -235,11 +269,12 @@ cmd_init() {
 		return 1
 	fi
 	cat <<'EOF' > "$template_file"
-- repo:
+-  repo:
     name: flathub
     title: Flathub
     url: https://dl.flathub.org/repo/flathub.flatpakrepo
-#    remove: false  # defaults to false; set to remove the remote and all flatpaks installed from the remote
+    remove: false  # optional, defaults to false; set to remove the remote and all flatpaks installed from the remote
+  scope: system  # optional, defaults to system; configure system or user remotes and installs
   install:
   - org.gnome.Paper
   uninstall:
@@ -247,15 +282,4 @@ cmd_init() {
 EOF
 }
 
-case "$1" in
-	install)
-		cmd_install "${config_files[@]}" || exit $?
-		;;
-	init)
-		cmd_init "${config_files[@]}" || exit $?
-		;;
-	*)
-		echo "Unrecognized command \"$1\"" >&2
-		exit 1
-		;;
-esac
+main "$@"
