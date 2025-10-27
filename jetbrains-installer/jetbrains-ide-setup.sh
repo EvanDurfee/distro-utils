@@ -56,6 +56,7 @@ options:
       --only-install       only install the tool, skip desktop and bin setup
       --no-desktop         skip desktop (launcher) installation
       --no-bin             skip adding symlink to bin dir
+      --experimental-wl    enable the experimental wayland mode in the desktop launcher
   -h, --help               print usage information and exit
 
 For fine-grained control, the exact directory for each component can be
@@ -78,7 +79,7 @@ EOF
 
 main() {
 	# Requires gnu enhanced getopt
-	ARGS=$(getopt --name "$PROG" --long 'help,user,system,install-dir:,desktop-dir:,bin-dir:,no-install,only-install,no-desktop,no-bin' --options 'hd:' -- "$@")
+	ARGS=$(getopt --name "$PROG" --long 'help,user,system,install-dir:,desktop-dir:,bin-dir:,no-install,only-install,no-desktop,no-bin,experimental-wl' --options 'hd:' -- "$@")
 	eval set -- "$ARGS"
 
 	install_dir=""
@@ -88,6 +89,10 @@ main() {
 	do_install=true
 	do_add_desktop_entry=true
 	do_link_bin=true
+	# https://youtrack.jetbrains.com/issue/JBR-3206/Native-Wayland-support
+	# XWayland has some issues, such as not-readjusting mouse scaling when switching screens (leaving either a tiny or giant mouse)
+	# Wayland support has been in development/testing for a few years
+	do_use_experimental_wayland=false
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			-h | --help)
@@ -126,6 +131,9 @@ main() {
 			--no-bin)
 				do_link_bin=false
 				;;
+			--experimental-wl)
+				do_use_experimental_wayland=true
+				;;
 			--)
 				shift
 				break
@@ -155,6 +163,10 @@ main() {
 	fi
 
 	arch=linux  # Just linux x86_64 for now
+	launch_args=()
+	if $do_use_experimental_wayland; then
+		launch_args+=('-Dawt.toolkit.name=WLToolkit')
+	fi
 	while [ $# -gt 0 ]; do
 		unset tool_name
 		unset tool_code
@@ -217,7 +229,7 @@ main() {
 			install_jetbrains_ide "$install_dir" "$tool_name" "$binary_name" "$tool_code" "$arch"
 		fi
 		if $do_add_desktop_entry; then
-			add_desktop_entry "$desktop_dir" "$install_dir" "$tool_name" "$binary_name" "$keywords"
+			add_desktop_entry "$desktop_dir" "$install_dir" "$tool_name" "$binary_name" "$keywords" "${launch_args[@]}"
 		fi
 		if $do_link_bin; then
 			ln --symbolic --force --no-target-directory "$install_dir"/"$binary_name"/bin/"$binary_name" "$bin_dir"/"$binary_name"
@@ -232,12 +244,13 @@ add_desktop_entry() {
 	tool_name="$1"; shift
 	binary_name="$1"; shift
 	keywords="$1"; shift
+	launch_args=("$@")
 
 	# create desktop launcher
 	cat <<EOF | tee "$desktop_dir"/"$binary_name".desktop >/dev/null
 [Desktop Entry]
 Name=${tool_name}
-Exec="${install_dir}/${binary_name}/bin/${binary_name}" %u
+Exec="${install_dir}/${binary_name}/bin/${binary_name}" "${launch_args[@]}" %u
 Version=1.0
 Type=Application
 Categories=Development;IDE;
