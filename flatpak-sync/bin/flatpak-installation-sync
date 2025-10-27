@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+set -x
 
 PROG="$(basename "$BASH_SOURCE")"
 
@@ -191,8 +192,10 @@ apply_config() {
 		return 1
 	fi
 
+	flatpak_cmd=(flatpak "--$remote_scope")
+
 	remote_exists=false
-	if flatpak remotes --show-disabled "--$remote_scope" --columns=name | tail -n +1 | grep --quiet --line-regexp --fixed-strings "$remote_name"; then
+	if "${flatpak_cmd[@]}" remotes --show-disabled --columns=name | tail -n +1 | grep --quiet --line-regexp --fixed-strings "$remote_name"; then
 		remote_exists=true
 	fi
 
@@ -203,20 +206,20 @@ apply_config() {
 		fi
 		echo "Preparing to delete remote $remote_name"
 
-		mapfile -t apps_to_uninstall < <(flatpak list --"$remote_scope"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		mapfile -t apps_to_uninstall < <("${flatpak_cmd[@]}" list --"$remote_scope"  --app --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
 		if [ "${#apps_to_uninstall[@]}" -gt 0 ]; then
 			echo "Uninstalling apps ${apps_to_uninstall[*]} from remote $remote_name"
-			flatpak uninstall "--$remote_scope" --noninteractive "${apps_to_uninstall[@]}"
+			"${flatpak_cmd[@]}" uninstall --noninteractive "${apps_to_uninstall[@]}"
 		fi
 
-		mapfile -t runtimes_to_uninstall < <(flatpak list --"$remote_scope" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
+		mapfile -t runtimes_to_uninstall < <("${flatpak_cmd[@]}" list --"$remote_scope" --runtime --columns=origin,application,arch,branch | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2,3,4 | sed -E "s|\t|/|g")
 		if [ "${#runtimes_to_uninstall[@]}" -gt 0 ]; then
 			echo "Uninstalling runtimes ${runtimes_to_uninstall[*]} from remote $remote_name"
-			flatpak uninstall "--$remote_scope" --noninteractive "${runtimes_to_uninstall[@]}"
+			"${flatpak_cmd[@]}" uninstall --noninteractive "${runtimes_to_uninstall[@]}"
 		fi
 
 		echo "Removing remote $remote_name"
-		flatpak remote-delete "--$remote_scope" "$remote_name"
+		"${flatpak_cmd[@]}" remote-delete "$remote_name"
 		return 0
 	fi
 
@@ -227,22 +230,24 @@ apply_config() {
 			return 1
 		fi
 		echo "Adding $remote_scope remote $remote_name ($remote_title) at $remote_url"
-		flatpak remote-add "--$remote_scope" --if-not-exists "$remote_name" --title="$remote_title" "$remote_url"
+		"${flatpak_cmd[@]}" remote-add --if-not-exists "$remote_name" --title="$remote_title" "$remote_url"
 	fi
 
-	# Enable the remote
-	flatpak remote-modify "--$remote_scope" --enable "$remote_name"
+	if ! "${flatpak_cmd[@]}" remotes --columns=name | tail -n +1 | grep --quiet --fixed-strings "$remote_name"; then
+		echo "Enable remote $remote_name"
+		"${flatpak_cmd[@]}" remote-modify --enable "$remote_name"
+	fi
 
 	# Install any desired flatpaks
 	if [ "${#install[@]}" -gt 0 ]; then
-		flatpak install "--$remote_scope" --noninteractive "$remote_name" "${install[@]}"
+		"${flatpak_cmd[@]}" install --noninteractive "$remote_name" "${install[@]}"
 	fi
 
 	# Uninstall any flatpaks that are already installed from the given remote
 	if [ "${#uninstall[@]}" -gt 0 ]; then
-		mapfile -t to_uninstall < <(sort <(flatpak list --columns=origin,application | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2 | sort --unique) <(for flatpak in "${uninstall[@]}"; do echo "$flatpak"; done) | uniq -d)
+		mapfile -t to_uninstall < <(sort <("${flatpak_cmd[@]}" list --columns=origin,application | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2 | sort --unique) <(for installed_flatpak in "${uninstall[@]}"; do echo "$installed_flatpak"; done) | uniq -d)
 		if [ "${#to_uninstall[@]}" -gt 0 ]; then
-			flatpak uninstall "--$remote_scope" --noninteractive "$remote_name" "${to_uninstall[@]}"
+			"${flatpak_cmd[@]}" uninstall --noninteractive "$remote_name" "${to_uninstall[@]}"
 		fi
 	fi
 	return 0
