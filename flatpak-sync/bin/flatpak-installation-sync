@@ -281,7 +281,7 @@ cmd_init() {
     remove: false  # optional, defaults to false; set to remove the remote and all flatpaks installed from the remote
   scope: system  # optional, defaults to system; configure system or user remotes and installs
   install:
-  - org.gnome.Paper
+  - org.gnome.Papers
   uninstall:
   - org.gnome.Evince
 EOF
