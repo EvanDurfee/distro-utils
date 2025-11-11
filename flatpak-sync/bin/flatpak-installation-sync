@@ -246,7 +246,7 @@ apply_config() {
 	if [ "${#uninstall[@]}" -gt 0 ]; then
 		mapfile -t to_uninstall < <(sort <("${flatpak_cmd[@]}" list --columns=origin,application | tail -n +1 | grep --fixed-strings "$remote_name"$'\t' | cut -f 2 | sort --unique) <(for installed_flatpak in "${uninstall[@]}"; do echo "$installed_flatpak"; done) | uniq -d)
 		if [ "${#to_uninstall[@]}" -gt 0 ]; then
-			"${flatpak_cmd[@]}" uninstall --noninteractive "$remote_name" "${to_uninstall[@]}"
+			"${flatpak_cmd[@]}" uninstall --noninteractive "${to_uninstall[@]}"
 		fi
 	fi
 	return 0
